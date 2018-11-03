@@ -1,120 +1,106 @@
-import tensorflow as tf 
-import tensorflow_hub as hub
+import cv2
+import os
+import sys
 import numpy as np
-import matplotlib.pyplot as plt
-from PIL import Image
-from PIL import ImageColor
-from PIL import ImageDraw
-from PIL import ImageFont
-from PIL import ImageOps
-import time
+import tensorflow as tf
+from picamera import PiCamera
+from picamera.array import PiRGBArray
+from utils import label_map_util
+from utils import visualization_utils as vis_util
+sys.path.append("..")
+
+# Path to the pretrained  model
+PATH_TO_CKPT = os.path.join('ssdlite_mobilenet_v2_coco_2018_05_09','frozen_inference_graph.pb')
+
+# List of the strings that is used to add correct label for each box.
+PATH_TO_LABELS = os.path.join('data', 'mscoco_label_map.pbtxt')
+
+NUM_CLASSES = 90
+
+# Load frozen model
+detection_graph = tf.Graph()
+with detection_graph.as_default():
+  od_graph_def = tf.GraphDef()
+  with tf.gfile.GFile(PATH_TO_CKPT, 'rb') as fid:
+    serialized_graph = fid.read()
+    od_graph_def.ParseFromString(serialized_graph)
+    tf.import_graph_def(od_graph_def, name='')
+
+# Load labels
+label_map = label_map_util.load_labelmap(PATH_TO_LABELS)
+categories = label_map_util.convert_label_map_to_categories(label_map, max_num_classes=NUM_CLASSES, use_display_name=True)
+category_index = label_map_util.create_category_index(categories)
+
+# Camara Settings
+video = cv2.VideoCapture(0)
+ret = video.set(3,1280)
+ret = video.set(4,720)
 
 
-def draw_bounding_box_on_image(image,
-                               ymin,
-                               xmin,
-                               ymax,
-                               xmax,
-                               color,
-                               font,
-                               thickness=4,
-                               display_str_list=()):
-  """Adds a bounding box to an image."""
-  draw = ImageDraw.Draw(image)
-  im_width, im_height = image.size
-  (left, right, top, bottom) = (xmin * im_width, xmax * im_width,
-                                ymin * im_height, ymax * im_height)
-  draw.line([(left, top), (left, bottom), (right, bottom), (right, top),
-             (left, top)],
-            width=thickness,
-            fill=color)
+# Inference 
+# Load the Tensorflow model into memory.
+detection_graph = tf.Graph()
+with detection_graph.as_default():
+    od_graph_def = tf.GraphDef()
+    with tf.gfile.GFile(PATH_TO_CKPT, 'rb') as fid:
+        serialized_graph = fid.read()
+        od_graph_def.ParseFromString(serialized_graph)
+        tf.import_graph_def(od_graph_def, name='')
 
-  # If the total height of the display strings added to the top of the bounding
-  # box exceeds the top of the image, stack the strings below the bounding box
-  # instead of above.
-  display_str_heights = [font.getsize(ds)[1] for ds in display_str_list]
-  # Each display_str has a top and bottom margin of 0.05x.
-  total_display_str_height = (1 + 2 * 0.05) * sum(display_str_heights)
+    sess = tf.Session(graph=detection_graph)
+ 
 
-  if top > total_display_str_height:
-    text_bottom = top
-  else:
-    text_bottom = bottom + total_display_str_height
-  # Reverse list and print from bottom to top.
-  for display_str in display_str_list[::-1]:
-    text_width, text_height = font.getsize(display_str)
-    margin = np.ceil(0.05 * text_height)
-    draw.rectangle([(left, text_bottom - text_height - 2 * margin),
-                    (left + text_width, text_bottom)],
-                   fill=color)
-    draw.text((left + margin, text_bottom - text_height - margin),
-              display_str,
-              fill="black",
-              font=font)
-    text_bottom -= text_height - 2 * margin
+# Define input and output tensors (i.e. data) for the object detection classifier
+
+# Input tensor is the image
+image_tensor = detection_graph.get_tensor_by_name('image_tensor:0')
+
+# Output tensors are the detection boxes, scores, and classes
+# Each box represents a part of the image where a particular object was detected
+detection_boxes = detection_graph.get_tensor_by_name('detection_boxes:0')
+
+# Each score represents level of confidence for each of the objects.
+# The score is shown on the result image, together with the class label.
+detection_scores = detection_graph.get_tensor_by_name('detection_scores:0')
+detection_classes = detection_graph.get_tensor_by_name('detection_classes:0')
+
+# Number of objects detected
+num_detections = detection_graph.get_tensor_by_name('num_detections:0')
+
+# Picamera
+camera=PiCamera()
+camera.resolution(640,480)
+rawCapture=PiRGBArray(camera, size=(640,480))
+rawCapture.truncate(0)
 
 
-def draw_boxes(image, boxes, class_names, scores, max_boxes=20, min_score=0.5):
-  """Overlay labeled boxes on an image with formatted scores and label names."""
-  colors = list(ImageColor.colormap.values())
+for frame in camera.capture_continuous(camera,format='rgb',use_video_port=True):
+    # Acquire frame and expand frame dimensions to have shape: [1, None, None, 3]
+    frame = frame.array
+    frame_expanded = np.expand_dims(frame, axis=0)
 
-  try:
-    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                              20)
-  except IOError:
-    print("Font not found, using default font.")
-    font = ImageFont.load_default()
+    # Perform the actual detection by running the model with the image as input
+    (boxes, scores, classes, num) = sess.run(
+        [detection_boxes, detection_scores, detection_classes, num_detections],
+        feed_dict={image_tensor: frame_expanded})
 
-  for i in range(min(boxes.shape[0], max_boxes)):
-    if scores[i] >= min_score:
-      ymin, xmin, ymax, xmax = tuple(boxes[i].tolist())
-      display_str = "{}: {}%".format(class_names[i].decode("ascii"),
-                                     int(100 * scores[i]))
-      color = colors[hash(class_names[i]) % len(colors)]
-      image_pil = Image.fromarray(np.uint8(image)).convert("RGB")
-      draw_bounding_box_on_image(
-          image_pil,
-          ymin,
-          xmin,
-          ymax,
-          xmax,
-          color,
-          font,
-          display_str_list=[display_str])
-      image= np.asarray(image_pil)
-  return image
+    # Draw the results of the detection (aka 'visulaize the results')
+    vis_util.visualize_boxes_and_labels_on_image_array(
+        frame,
+        np.squeeze(boxes),
+        np.squeeze(classes).astype(np.int32),
+        np.squeeze(scores),
+        category_index,
+        use_normalized_coordinates=True,
+        line_thickness=8,
+        min_score_thresh=0.60)
 
-def Detection(img):
-    """Object Detection with Faster R-CNN"""
-    with tf.Graph().as_default():
-        
-        # Faster R-CNN module
-        detector = hub.Module('Modelo')
-        # numpy image
-        image= preprocessing(img)
-        # Preprocessing
-        decoded_image=tf.convert_to_tensor(image)
-        img_Tensor = tf.image.convert_image_dtype(image=decoded_image, dtype=tf.float32)
-        # Inference
-        result = detector(img_Tensor, as_dict=True)
-        # Initialize variables
-        init_ops = [tf.initialize_all_variables(), tf.tables_initializer()]
+    # All the results have been drawn on the frame, so it's time to display it.
+    cv2.imshow('Object detector', frame)
 
-        session = tf.Session()
-        session.run(init_ops)
-
-        result_out, image_out = session.run(
-            [result, decoded_image])
-
-        return result_out,image_out
-          
-
-def preprocessing(img):
-    """Preprocessing of the image
-    Arg:
-    img: numpy array RGB [w,h,c]
-    """
-    img=img/255.0
-    img=tf.expand_dims(img,0) # shape [batch_size, h,w,c]
-    return img 
-
+    # Press 'q' to quit
+    if cv2.waitKey(1) == ord('q'):
+        break
+    rawCapture.truncate(0)
+# Clean up
+camera.close()
